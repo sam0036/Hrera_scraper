@@ -85,7 +85,7 @@ async function scrapeHaryanaDatabase(reraNumber) {
       "https://haryanarera.gov.in/admincontrol/registered_agents/2",
       {
         waitUntil: "domcontentloaded",
-        timeout: 45000,
+        timeout: 200000,
       }
     );
 
