@@ -1,9 +1,12 @@
-import puppeteer from "puppeteer-extra";
+// ✅ FIXED: Import puppeteer-extra and bind it to puppeteer-core
+import vanillaPuppeteer from "puppeteer-core";
+import { addExtra } from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import chromium from "@sparticuz/chromium";
 import { getReraStatusFromExpiry } from "./reraStatus.js";
 
-// ✅ CRITICAL: Apply stealth BEFORE any launch calls
+// ✅ Bind stealth plugin to puppeteer-core
+const puppeteer = addExtra(vanillaPuppeteer);
 puppeteer.use(StealthPlugin());
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -49,7 +52,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
     const executablePath = await chromium.executablePath();
     if (!executablePath) throw new Error("Chromium not found");
 
-    // ✅ FIXED: Use puppeteer-extra with stealth plugin
     browser = await puppeteer.launch({
       args: [
         ...chromium.args,
@@ -84,7 +86,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
 
     const page = await browser.newPage();
 
-    // ✅ CRITICAL: Set viewport + extra headers BEFORE goto
     await page.setViewport({ width: 1366, height: 768 });
     await page.setExtraHTTPHeaders({
       "Accept-Language": "en-US,en;q=0.9",
@@ -93,7 +94,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
       "Cache-Control": "max-age=0",
     });
 
-    // ✅ CRITICAL: Block heavy resources BEFORE goto
     await page.setRequestInterception(true);
     page.on("request", (req) => {
       const type = req.resourceType();
@@ -104,8 +104,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
       }
     });
 
-    // ✅ FIXED: Use goto with explicit timeout and NO waitUntil
-    // Then manually poll for content — this bypasses lifecycle hangs
     const response = await page.goto(
       "https://haryanarera.gov.in/admincontrol/registered_agents/2",
       {
@@ -127,7 +125,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
 
     console.log("PAGE TITLE:", await page.title());
 
-    // ✅ FIXED: Poll for search input instead of waitForSelector
     const searchSelector = 'input[type="search"]';
     const maxWaitTime = 15000;
     const pollInterval = 500;
@@ -141,7 +138,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
     }
 
     if (!searchInput) {
-      // One reload attempt
       await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
       const reloadStart = Date.now();
       while (Date.now() - reloadStart < maxWaitTime) {
@@ -155,7 +151,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
       throw new Error("Search input not found after retries");
     }
 
-    // ✅ Type and trigger search
     await page.evaluate((sel) => {
       const el = document.querySelector(sel);
       if (el) {
@@ -165,10 +160,8 @@ async function scrapeHaryanaDatabase(reraNumber) {
     }, searchSelector);
     await page.type(searchSelector, reraNumber, { delay: 15 });
 
-    // Small delay for DataTables to process
     await new Promise((r) => setTimeout(r, 1000));
 
-    // ✅ Poll for table rows
     const tableStart = Date.now();
     let rows = [];
     while (Date.now() - tableStart < 15000) {
