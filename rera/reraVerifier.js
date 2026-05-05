@@ -1,36 +1,10 @@
 import puppeteer from "puppeteer-core";
 import chromium from "@sparticuz/chromium";
-import { getReraStatusFromExpiry } from "./reraStatus.js";
+import { getReraStatusFromExpiry } from "./reraStatus";
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const MAX_RETRIES = 3;
-
 const cache = new Map();
 const inProgress = new Map();
-
-// ---------------- UTIL: sleep ----------------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ---------------- UTIL: retry ----------------
-async function withRetries(fn, retries = MAX_RETRIES) {
-  let lastError;
-
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await fn(i);
-    } catch (err) {
-      lastError = err;
-
-      const isBlocked = err.message === "IP_BLOCKED";
-
-      // exponential backoff
-      const delay = isBlocked ? 5000 * (i + 1) : 1500 * (i + 1);
-      await sleep(delay);
-    }
-  }
-
-  throw lastError;
-}
 
 // ---------------- DATE PARSER ----------------
 export function parseReraDate(value) {
@@ -65,140 +39,123 @@ function getCached(key) {
   return entry.value;
 }
 
-// ---------------- SCRAPER CORE ----------------
+// ---------------- SCRAPER ----------------
 async function scrapeHaryanaDatabase(reraNumber) {
-  return withRetries(async (attempt) => {
-    let browser;
+  let browser;
 
-    try {
-      const executablePath = await chromium.executablePath();
-      if (!executablePath) throw new Error("Chromium executable not found");
+  try {
+    // ✅ Render-compatible Chromium
+    const executablePath = await chromium.executablePath();
+    if (!executablePath) throw new Error("Chromium not found");
 
-      browser = await puppeteer.launch({
-        args: [
-          ...chromium.args,
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-          "--single-process",
-          "--no-zygote",
-        ],
-        executablePath,
-        headless: true,
-      });
+    browser = await puppeteer.launch({
+      args: [
+        ...chromium.args,
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--single-process",
+        "--no-zygote",
+      ],
+      executablePath,
+      headless: true,
+    });
 
-      const page = await browser.newPage();
+    const page = await browser.newPage();
 
-      await page.setViewport({ width: 1366, height: 768 });
+    // ✅ Prevent detection + layout issues
+    await page.setViewport({ width: 1366, height: 768 });
 
-      await page.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36"
-      );
+    page.setDefaultTimeout(15000);
+    page.setDefaultNavigationTimeout(20000);
 
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, "webdriver", { get: () => false });
-        window.chrome = { runtime: {} };
-      });
-
-      page.setDefaultTimeout(30000);
-      page.setDefaultNavigationTimeout(30000);
-
-      // block heavy resources only
-      await page.setRequestInterception(true);
-      page.on("request", (req) => {
-        const type = req.resourceType();
-        if (["image", "font", "media"].includes(type)) req.abort();
-        else req.continue();
-      });
-
-      // navigate
-      await page.goto(
-        "https://haryanarera.gov.in/admincontrol/registered_agents/2",
-        { waitUntil: "domcontentloaded" }
-      );
-
-      // detect blocking
-      const title = await page.title();
-      if (title.toLowerCase().includes("access denied")) {
-        throw new Error("IP_BLOCKED");
+    // ✅ Keep stylesheets (important for DataTables)
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      const resourceType = request.resourceType();
+      if (["image", "font", "media"].includes(resourceType)) {
+        request.abort();
+      } else {
+        request.continue();
       }
+    });
 
-      const searchSelector = 'input[type="search"]';
-      await page.waitForSelector(searchSelector);
-
-      // clear + type
-      await page.click(searchSelector, { clickCount: 3 });
-      await page.keyboard.press("Backspace");
-
-      await page.type(searchSelector, reraNumber, { delay: 80 });
-      await page.keyboard.press("Enter");
-
-      // 🔥 resilient wait (handles slow AJAX)
-      await page.waitForFunction(
-        (target) => {
-          const rows = document.querySelectorAll("table tbody tr");
-          if (!rows.length) return false;
-
-          return Array.from(rows).some((row) =>
-            row.innerText.toLowerCase().includes(target.toLowerCase())
-          );
-        },
-        { timeout: 20000 },
-        reraNumber
-      );
-
-      // extract
-      const data = await page.evaluate((targetID) => {
-        const normalize = (str) =>
-          String(str || "")
-            .toLowerCase()
-            .replace(/\s+/g, " ")
-            .replace(/[^a-z0-9 ]/g, "")
-            .trim();
-
-        const target = normalize(targetID);
-
-        const rows = Array.from(document.querySelectorAll("table tbody tr"));
-
-        const match = rows.find((row) => {
-          const cells = row.querySelectorAll("td");
-          return normalize(cells[1]?.innerText) === target;
-        });
-
-        if (!match) return null;
-
-        const cells = match.querySelectorAll("td");
-
-        return {
-          registrationNumber: cells[1]?.innerText.trim() || "",
-          agentName: cells[2]?.innerText.trim() || "",
-          district: cells[3]?.innerText.trim() || "",
-          status: cells[4]?.innerText.trim() || "",
-          validity: cells[6]?.innerText.trim() || "",
-        };
-      }, reraNumber);
-
-      if (!data) {
-        return {
-          success: false,
-          status: "NOT_FOUND",
-          message: "RERA number not found",
-        };
+    await page.goto(
+      "https://haryanarera.gov.in/admincontrol/registered_agents/2",
+      {
+        waitUntil: "domcontentloaded",
+        timeout: 20000,
       }
+    );
 
-      const parsedValidity = parseReraDate(data.validity);
-      const verificationStatus = getReraStatusFromExpiry(parsedValidity);
+    const searchSelector = 'input[type="search"]';
+
+    await page.waitForSelector(searchSelector, { timeout: 15000 });
+
+    await page.click(searchSelector, { clickCount: 3 });
+    await page.type(searchSelector, reraNumber, { delay: 5 });
+
+    // wait for table rows to load (safer than instant read)
+    await page.waitForSelector("table tbody tr", { timeout: 15000 });
+
+    const data = await page.evaluate((targetID) => {
+      const rows = Array.from(document.querySelectorAll("table tbody tr"));
+
+      const normalizedTarget = targetID.trim().toLowerCase();
+
+      const match = rows.find((row) => {
+        const cells = row.querySelectorAll("td");
+        return cells[1]?.innerText.trim().toLowerCase() === normalizedTarget;
+      });
+
+      if (!match) return null;
+
+      const cells = match.querySelectorAll("td");
 
       return {
-        success: true,
-        status: verificationStatus,
-        data: { ...data, parsedValidity },
+        registrationNumber: cells[1]?.innerText.trim() || "",
+        agentName: cells[2]?.innerText.trim() || "",
+        district: cells[3]?.innerText.trim() || "",
+        status: cells[4]?.innerText.trim() || "",
+        validity: cells[6]?.innerText.trim() || "",
       };
-    } finally {
-      if (browser) await browser.close();
+    }, reraNumber);
+
+    if (!data) {
+      return {
+        success: false,
+        status: "NOT_FOUND",
+        message: "RERA number was not found",
+      };
     }
-  });
+
+    const parsedValidity = parseReraDate(data.validity);
+    const verificationStatus = getReraStatusFromExpiry(parsedValidity);
+
+    return {
+      success: true,
+      status: verificationStatus,
+      data: {
+        ...data,
+        parsedValidity,
+      },
+    };
+  } catch (error) {
+    console.error("SCRAPER ERROR:", error.message);
+
+    return {
+      success: false,
+      status: "FAILED",
+      message: "RERA authority verification is temporarily unavailable",
+    };
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
+    }
+  }
 }
 
 // ---------------- MAIN ----------------
@@ -214,15 +171,15 @@ export async function verifyRera(reraNumber, state = "Haryana") {
     };
   }
 
-  if (normalizedState.toLowerCase() !== "haryana") {
+  if (normalizedState && normalizedState.toLowerCase() !== "haryana") {
     return {
       success: false,
       status: "UNSUPPORTED_STATE",
-      message: "Only Haryana supported",
+      message: "Automated verification is currently available for Haryana RERA only",
     };
   }
 
-  const key = cacheKey(normalizedNumber, normalizedState);
+  const key = cacheKey(normalizedNumber, normalizedState || "Haryana");
 
   const cached = getCached(key);
   if (cached) return cached;
@@ -240,12 +197,6 @@ export async function verifyRera(reraNumber, state = "Haryana") {
     }
 
     return result;
-  } catch (error) {
-    return {
-      success: false,
-      status: error.message === "IP_BLOCKED" ? "BLOCKED" : "FAILED",
-      message: "Verification temporarily unavailable",
-    };
   } finally {
     inProgress.delete(key);
   }
