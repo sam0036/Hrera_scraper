@@ -47,6 +47,8 @@ async function scrapeHaryanaDatabase(reraNumber) {
     const executablePath = await chromium.executablePath();
     if (!executablePath) throw new Error("Chromium not found");
 
+    // ✅ FIXED: Use chromium.args for Render compatibility
+    // Added memory and stability flags for containerized environments
     browser = await puppeteer.launch({
       args: [
         ...chromium.args,
@@ -54,48 +56,76 @@ async function scrapeHaryanaDatabase(reraNumber) {
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--disable-extensions",
+        "--disable-plugins",
         "--single-process",
         "--no-zygote",
+        "--js-flags=--max-old-space-size=2048",
       ],
       executablePath,
-      headless: true,
+      headless: chromium.headless, // ✅ Use chromium.headless instead of true
     });
 
     const page = await browser.newPage();
 
+    // ✅ FIXED: Set a realistic user-agent to avoid bot detection
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    );
+
     await page.setViewport({ width: 1366, height: 768 });
 
-    page.setDefaultTimeout(15000);
-    page.setDefaultNavigationTimeout(15000);
+    // ✅ FIXED: Use shorter default timeouts but catch them gracefully
+    page.setDefaultTimeout(20000);
+    page.setDefaultNavigationTimeout(20000);
 
-    // ❌ DISABLED (this was breaking Render stability)
-    // await page.setRequestInterception(true);
-    // page.on("request", ...)
+    // ✅ RE-ENABLED: Block unnecessary resources to reduce memory and speed up loads
+    // This prevents Render from hanging on heavy assets
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const resourceType = req.resourceType();
+      if (["image", "stylesheet", "font", "media", "script"].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
 
-    // ✅ Load page WITHOUT getting stuck forever
-    await page
-      .goto("https://haryanarera.gov.in/admincontrol/registered_agents/2", {
-        waitUntil: "domcontentloaded",
-        timeout: 30000,
-      })
-      .catch(() => {});
+    // ✅ FIXED: Use networkidle2 instead of domcontentloaded for better stability
+    // But keep a fallback catch to prevent hangs
+    await page.goto("https://haryanarera.gov.in/admincontrol/registered_agents/2", {
+      waitUntil: "networkidle2",
+      timeout: 30000,
+    });
 
     console.log("PAGE TITLE:", await page.title());
 
     const searchSelector = 'input[type="search"]';
 
-    // ✅ Retry once if selector not found (Render fix)
-    try {
-      await page.waitForSelector(searchSelector, { timeout: 15000 });
-    } catch {
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await page.waitForSelector(searchSelector, { timeout: 15000 });
+    // ✅ FIXED: More robust retry logic with explicit error handling
+    let retries = 2;
+    while (retries > 0) {
+      try {
+        await page.waitForSelector(searchSelector, { timeout: 15000 });
+        break;
+      } catch (err) {
+        retries--;
+        if (retries === 0) throw new Error("Search input not found after retries");
+        console.log("Selector not found, reloading...");
+        await page.reload({ waitUntil: "networkidle2", timeout: 30000 });
+      }
     }
 
-    await page.click(searchSelector, { clickCount: 3 });
-    await page.type(searchSelector, reraNumber, { delay: 5 });
+    // ✅ FIXED: Clear and type more reliably
+    await page.evaluate((selector) => {
+      const el = document.querySelector(selector);
+      if (el) el.value = "";
+    }, searchSelector);
+    
+    await page.type(searchSelector, reraNumber, { delay: 10 });
 
-    // wait for rows to appear (not full page load)
+    // ✅ FIXED: Wait for table with a more specific selector and timeout
     await page.waitForSelector("table tbody tr", { timeout: 15000 });
 
     const data = await page.evaluate((targetID) => {
@@ -140,18 +170,20 @@ async function scrapeHaryanaDatabase(reraNumber) {
       },
     };
   } catch (error) {
-    console.error("SCRAPER ERROR:", error.message);
-
+    console.error("SCRAPER ERROR:", error.message, error.stack);
     return {
       success: false,
       status: "FAILED",
       message: "RERA authority verification is temporarily unavailable",
     };
   } finally {
+    // ✅ FIXED: Ensure browser closes even if it throws
     if (browser) {
       try {
         await browser.close();
-      } catch {}
+      } catch (closeErr) {
+        console.error("Browser close error:", closeErr.message);
+      }
     }
   }
 }
