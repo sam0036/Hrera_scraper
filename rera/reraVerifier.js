@@ -30,12 +30,10 @@ function cacheKey(reraNumber, state) {
 function getCached(key) {
   const entry = cache.get(key);
   if (!entry) return null;
-
   if (Date.now() - entry.cachedAt > CACHE_TTL_MS) {
     cache.delete(key);
     return null;
   }
-
   return entry.value;
 }
 
@@ -47,8 +45,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
     const executablePath = await chromium.executablePath();
     if (!executablePath) throw new Error("Chromium not found");
 
-    // ✅ FIXED: Use chromium.args for Render compatibility
-    // Added memory and stability flags for containerized environments
     browser = await puppeteer.launch({
       args: [
         ...chromium.args,
@@ -61,102 +57,136 @@ async function scrapeHaryanaDatabase(reraNumber) {
         "--disable-plugins",
         "--single-process",
         "--no-zygote",
-        "--js-flags=--max-old-space-size=2048",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-breakpad",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-features=TranslateUI",
+        "--disable-hang-monitor",
+        "--disable-ipc-flooding-protection",
+        "--disable-popup-blocking",
+        "--disable-prompt-on-repost",
+        "--disable-renderer-backgrounding",
+        "--force-color-profile=srgb",
+        "--metrics-recording-only",
+        "--safebrowsing-disable-auto-update",
       ],
       executablePath,
-      headless: chromium.headless, // ✅ Use chromium.headless instead of true
+      headless: chromium.headless,
     });
 
     const page = await browser.newPage();
 
-    // ✅ FIXED: Set a realistic user-agent to avoid bot detection
+    // ✅ Anti-bot: Realistic UA + viewport + locale
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
-
     await page.setViewport({ width: 1366, height: 768 });
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-US,en;q=0.9",
+    });
 
-    // ✅ FIXED: Use shorter default timeouts but catch them gracefully
-    page.setDefaultTimeout(20000);
-    page.setDefaultNavigationTimeout(20000);
-
-    // ✅ RE-ENABLED: Block unnecessary resources to reduce memory and speed up loads
-    // This prevents Render from hanging on heavy assets
+    // ✅ CRITICAL FIX: Block heavy resources BEFORE goto to prevent hangs
     await page.setRequestInterception(true);
     page.on("request", (req) => {
-      const resourceType = req.resourceType();
-      if (["image", "stylesheet", "font", "media", "script"].includes(resourceType)) {
+      const type = req.resourceType();
+      if (["image", "stylesheet", "font", "media", "manifest", "other"].includes(type)) {
         req.abort();
       } else {
         req.continue();
       }
     });
 
-    // ✅ FIXED: Use networkidle2 instead of domcontentloaded for better stability
-    // But keep a fallback catch to prevent hangs
+    // ✅ CRITICAL FIX: Hard timeout on goto — don't wait for networkidle
+    // Use domcontentloaded with a 15s cap, then manually wait for the table
     await page.goto("https://haryanarera.gov.in/admincontrol/registered_agents/2", {
-      waitUntil: "networkidle2",
-      timeout: 30000,
+      waitUntil: "domcontentloaded",
+      timeout: 15000,
     });
 
     console.log("PAGE TITLE:", await page.title());
 
+    // ✅ CRITICAL FIX: Don't rely on waitForSelector alone — use polling with timeout
     const searchSelector = 'input[type="search"]';
+    const maxWaitTime = 10000;
+    const pollInterval = 500;
+    const startTime = Date.now();
+    let searchInput = null;
 
-    // ✅ FIXED: More robust retry logic with explicit error handling
-    let retries = 2;
-    while (retries > 0) {
-      try {
-        await page.waitForSelector(searchSelector, { timeout: 15000 });
-        break;
-      } catch (err) {
-        retries--;
-        if (retries === 0) throw new Error("Search input not found after retries");
-        console.log("Selector not found, reloading...");
-        await page.reload({ waitUntil: "networkidle2", timeout: 30000 });
+    while (Date.now() - startTime < maxWaitTime) {
+      searchInput = await page.$(searchSelector);
+      if (searchInput) break;
+      await new Promise((r) => setTimeout(r, pollInterval));
+    }
+
+    if (!searchInput) {
+      // One reload attempt if selector missing
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
+      const reloadStart = Date.now();
+      while (Date.now() - reloadStart < maxWaitTime) {
+        searchInput = await page.$(searchSelector);
+        if (searchInput) break;
+        await new Promise((r) => setTimeout(r, pollInterval));
       }
     }
 
-    // ✅ FIXED: Clear and type more reliably
-    await page.evaluate((selector) => {
-      const el = document.querySelector(selector);
-      if (el) el.value = "";
+    if (!searchInput) {
+      throw new Error("Search input not found after retries");
+    }
+
+    // ✅ Clear and type reliably
+    await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (el) {
+        el.value = "";
+        el.focus();
+      }
     }, searchSelector);
-    
     await page.type(searchSelector, reraNumber, { delay: 10 });
 
-    // ✅ FIXED: Wait for table with a more specific selector and timeout
-    await page.waitForSelector("table tbody tr", { timeout: 15000 });
+    // ✅ CRITICAL FIX: Poll for table rows instead of waitForSelector
+    // DataTables often updates DOM asynchronously
+    const tableRowsSelector = "table tbody tr";
+    const tableStart = Date.now();
+    let rows = [];
 
-    const data = await page.evaluate((targetID) => {
-      const rows = Array.from(document.querySelectorAll("table tbody tr"));
-      const normalizedTarget = targetID.trim().toLowerCase();
+    while (Date.now() - tableStart < 15000) {
+      rows = await page.$$eval(tableRowsSelector, (trs) =>
+        trs.map((tr) => Array.from(tr.querySelectorAll("td")).map((td) => td.innerText.trim()))
+      );
+      // If we have rows with actual content, break
+      if (rows.length > 0 && rows[0].length > 0) break;
+      await new Promise((r) => setTimeout(r, 800));
+    }
 
-      const match = rows.find((row) => {
-        const cells = row.querySelectorAll("td");
-        return cells[1]?.innerText.trim().toLowerCase() === normalizedTarget;
-      });
-
-      if (!match) return null;
-
-      const cells = match.querySelectorAll("td");
-
-      return {
-        registrationNumber: cells[1]?.innerText.trim() || "",
-        agentName: cells[2]?.innerText.trim() || "",
-        district: cells[3]?.innerText.trim() || "",
-        status: cells[4]?.innerText.trim() || "",
-        validity: cells[6]?.innerText.trim() || "",
-      };
-    }, reraNumber);
-
-    if (!data) {
+    if (rows.length === 0) {
       return {
         success: false,
         status: "NOT_FOUND",
         message: "RERA number was not found",
       };
     }
+
+    const normalizedTarget = reraNumber.trim().toLowerCase();
+    const match = rows.find((cells) => cells[1]?.toLowerCase() === normalizedTarget);
+
+    if (!match) {
+      return {
+        success: false,
+        status: "NOT_FOUND",
+        message: "RERA number was not found",
+      };
+    }
+
+    const data = {
+      registrationNumber: match[1] || "",
+      agentName: match[2] || "",
+      district: match[3] || "",
+      status: match[4] || "",
+      validity: match[6] || "",
+    };
 
     const parsedValidity = parseReraDate(data.validity);
     const verificationStatus = getReraStatusFromExpiry(parsedValidity);
@@ -177,7 +207,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
       message: "RERA authority verification is temporarily unavailable",
     };
   } finally {
-    // ✅ FIXED: Ensure browser closes even if it throws
     if (browser) {
       try {
         await browser.close();
@@ -221,11 +250,9 @@ export async function verifyRera(reraNumber, state = "Haryana") {
 
   try {
     const result = await promise;
-
     if (result.success) {
       cache.set(key, { value: result, cachedAt: Date.now() });
     }
-
     return result;
   } finally {
     inProgress.delete(key);
