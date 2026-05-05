@@ -44,7 +44,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
   let browser;
 
   try {
-    // ✅ Render-compatible Chromium
     const executablePath = await chromium.executablePath();
     if (!executablePath) throw new Error("Chromium not found");
 
@@ -64,44 +63,43 @@ async function scrapeHaryanaDatabase(reraNumber) {
 
     const page = await browser.newPage();
 
-    // ✅ Prevent detection + layout issues
     await page.setViewport({ width: 1366, height: 768 });
 
     page.setDefaultTimeout(15000);
-    page.setDefaultNavigationTimeout(20000);
+    page.setDefaultNavigationTimeout(15000);
 
-    // ✅ Keep stylesheets (important for DataTables)
-    await page.setRequestInterception(true);
-    page.on("request", (request) => {
-      const resourceType = request.resourceType();
-      if (["image", "font", "media"].includes(resourceType)) {
-        request.abort();
-      } else {
-        request.continue();
-      }
-    });
+    // ❌ DISABLED (this was breaking Render stability)
+    // await page.setRequestInterception(true);
+    // page.on("request", ...)
 
-    await page.goto(
-      "https://haryanarera.gov.in/admincontrol/registered_agents/2",
-      {
+    // ✅ Load page WITHOUT getting stuck forever
+    await page
+      .goto("https://haryanarera.gov.in/admincontrol/registered_agents/2", {
         waitUntil: "domcontentloaded",
-        timeout: 200000,
-      }
-    );
+        timeout: 30000,
+      })
+      .catch(() => {});
+
+    console.log("PAGE TITLE:", await page.title());
 
     const searchSelector = 'input[type="search"]';
 
-    await page.waitForSelector(searchSelector, { timeout: 15000 });
+    // ✅ Retry once if selector not found (Render fix)
+    try {
+      await page.waitForSelector(searchSelector, { timeout: 15000 });
+    } catch {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector(searchSelector, { timeout: 15000 });
+    }
 
     await page.click(searchSelector, { clickCount: 3 });
     await page.type(searchSelector, reraNumber, { delay: 5 });
 
-    // wait for table rows to load (safer than instant read)
+    // wait for rows to appear (not full page load)
     await page.waitForSelector("table tbody tr", { timeout: 15000 });
 
     const data = await page.evaluate((targetID) => {
       const rows = Array.from(document.querySelectorAll("table tbody tr"));
-
       const normalizedTarget = targetID.trim().toLowerCase();
 
       const match = rows.find((row) => {
