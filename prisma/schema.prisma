@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            Int            @id @default(autoincrement())
+  email         String         @unique
+  password      String
+  role          String         @default("buyer")
+  createdAt     DateTime       @default(now())
+  brokerProfile BrokerProfile?
+}
+
+
+model BrokerProfile {
+  id                      String                @id @default(cuid())
+  userId                  Int                   @unique
+  reraNumber              String                @unique
+  state                   String
+  isReraVerified          Boolean               @default(false)
+  licenseExpiry           DateTime?
+  reraExpiryDate          DateTime?
+  reraVerificationStatus  String                @default("PENDING")
+  reraLastCheckedAt       DateTime?
+  reraVerificationMessage String?
+  user                    User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verificationJobs        ReraVerificationJob[]
+
+  @@index([reraExpiryDate])
+  @@index([reraVerificationStatus])
+}
+
+model ReraVerificationJob {
+  id              String        @id @default(cuid())
+  brokerProfileId String
+  requestedBy     Int
+  reraNumber      String
+  state           String
+  status          String        @default("QUEUED")
+  attempts        Int           @default(0)
+  result          Json?
+  error           String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  brokerProfile   BrokerProfile @relation(fields: [brokerProfileId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([brokerProfileId, createdAt])
+}
+
+model Builder {
+  id           String        @id @default(cuid())
+  name         String        @unique
+  projects     Project[]
+  brokerOffers BrokerOffer[]
+  createdAt    DateTime      @default(now())
+}
+
+model Project {
+   id           String        @id @default(cuid())
+  name         String
+  builderId    String
+  builder      Builder       @relation(fields: [builderId], references: [id], onDelete: Restrict)
+  unitTypes    UnitType[]
+  buyerRequests Request[]
+  brokerOffers BrokerOffer[]
+  createdAt    DateTime      @default(now())
+
+  @@unique([builderId, name])
+  @@index([builderId])
+}
+
+model UnitType {
+  id        String   @id @default(cuid())
+  name      String
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sizes     size[]
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+model size {
+  id         String   @id @default(cuid())
+  value      String
+  unitTypeId String
+  unitType   UnitType @relation(fields: [unitTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([unitTypeId, value])
+  @@index([unitTypeId])
+}
+
+model Request {
+  id          String   @id @default(cuid())
+  userId      String
+  builderId   String?
+  propertyId  String?
+  builder     String
+  project     String
+  unitType    String
+  size        String
+  quotedPrice Float
+  preferences Json?
+  fullName    String
+  phone       String
+  email       String
+  status      String   @default("PENDING")
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  property    Project? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  matches     Match[]
+
+  @@index([userId, createdAt])
+  @@index([builderId, propertyId])
+  @@index([propertyId, unitType, size, quotedPrice])
+  @@index([status, expiresAt])
+}
+
+model BrokerOffer {
+  id         String   @id @default(cuid())
+  brokerId   String
+  builderId  String
+  propertyId String
+  builder    String
+  project    String
+  unitType   String
+  size       String
+  price      Float
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  builderRef Builder  @relation(fields: [builderId], references: [id], onDelete: Restrict)
+  property   Project  @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  matches    Match[]
+
+  @@unique([brokerId, propertyId, unitType, size])
+  @@index([brokerId, createdAt])
+  @@index([builderId, propertyId])
+  @@index([propertyId, unitType, size, price])
+  @@map("broker_offers")
+}
+
+model Match {
+  id        String      @id @default(cuid())
+  requestId String
+  offerId   String
+  createdAt DateTime    @default(now())
+  request   Request     @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  offer     BrokerOffer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+
+  @@unique([requestId, offerId])
+  @@index([offerId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  requestId String?
+  offerId   String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, read, createdAt])
+  @@index([requestId])
+  @@index([offerId])
+}
+
+model LegacyOffer {
+  id        String   @id
+  brokerId  String
+  builder   String
+  project   String
+  unitType  String
+  size      String
+  price     Float
+  createdAt DateTime
+
+  @@ignore
+  @@map("Offer")
+}
