@@ -6,8 +6,7 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const cache = new Map();
 const inProgress = new Map();
 
-// Optional: Proxy config (ScrapingBee, Bright Data, etc.)
-const PROXY_URL = process.env.PROXY_URL || null; // e.g. "http://user:pass@proxy:port"
+const PROXY_URL = process.env.PROXY_URL || null;
 
 // ---------------- DATE PARSER ----------------
 export function parseReraDate(value) {
@@ -76,7 +75,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
       "--safebrowsing-disable-auto-update",
     ];
 
-    // ✅ Add proxy if configured
     if (PROXY_URL) {
       args.push(`--proxy-server=${PROXY_URL}`);
     }
@@ -89,7 +87,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
 
     const page = await browser.newPage();
 
-    // ✅ Authenticate proxy if needed
     if (PROXY_URL && PROXY_URL.includes("@")) {
       const proxyAuth = PROXY_URL.match(/\/\/([^:]+):([^@]+)@/);
       if (proxyAuth) {
@@ -118,35 +115,62 @@ async function scrapeHaryanaDatabase(reraNumber) {
       }
     });
 
-    // ✅ FIXED: Use "load" with longer timeout, but catch and continue
+    // ✅ FIXED: Track all navigation events to detect redirects
+    let lastUrl = "";
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) {
+        console.log("Navigated to:", frame.url());
+        lastUrl = frame.url();
+      }
+    });
+
+    // ✅ FIXED: Don't catch timeout — let it throw, but check page state first
     let response;
     try {
       response = await page.goto(
         "https://haryanarera.gov.in/admincontrol/registered_agents/2",
         {
-          waitUntil: "load",
+          waitUntil: "domcontentloaded",
           timeout: 30000,
         }
       );
     } catch (navErr) {
-      console.log("Navigation timeout, checking if page partially loaded...");
-      // Sometimes the page loads but never fires 'load' event
-      response = await page.evaluate(() => ({
-        ok: document.body && document.body.innerHTML.length > 0,
-        title: document.title,
-      }));
-      if (!response.ok) throw navErr;
+      console.log("Navigation error:", navErr.message);
+      console.log("Last URL:", lastUrl);
+      
+      // Check current page state without evaluating (avoid context destroyed)
+      const currentUrl = page.url();
+      console.log("Current URL:", currentUrl);
+      
+      // If we're on a different page, the site redirected us (block page?)
+      if (currentUrl && !currentUrl.includes("registered_agents")) {
+        throw new Error(`Redirected to ${currentUrl} — possible bot block`);
+      }
+      
+      throw navErr;
     }
 
-    if (response && response.status && response.status() >= 400) {
+    if (response && response.status() >= 400) {
       throw new Error(`HTTP ${response.status()} from server`);
     }
 
-    console.log("PAGE TITLE:", await page.title());
+    // ✅ FIXED: Wait a bit for any client-side redirects to settle
+    await new Promise((r) => setTimeout(r, 2000));
 
-    // Check if we got blocked
+    console.log("PAGE TITLE:", await page.title());
+    console.log("PAGE URL:", page.url());
+
+    // Check content safely
     const content = await page.content();
-    if (content.length < 200 || content.includes("Access Denied") || content.includes("blocked") || content.includes("captcha")) {
+    console.log("Content length:", content.length);
+    console.log("Content snippet:", content.slice(0, 500));
+
+    if (content.length < 200 || 
+        content.includes("Access Denied") || 
+        content.includes("blocked") || 
+        content.includes("captcha") ||
+        content.includes("403") ||
+        content.includes("Forbidden")) {
       throw new Error("Page blocked or empty");
     }
 
@@ -163,7 +187,7 @@ async function scrapeHaryanaDatabase(reraNumber) {
     }
 
     if (!searchInput) {
-      await page.reload({ waitUntil: "load", timeout: 25000 });
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 25000 });
       const reloadStart = Date.now();
       while (Date.now() - reloadStart < maxWaitTime) {
         searchInput = await page.$(searchSelector);
