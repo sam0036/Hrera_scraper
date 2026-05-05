@@ -1,6 +1,10 @@
-import puppeteer from "puppeteer-core";
+import puppeteer from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import chromium from "@sparticuz/chromium";
 import { getReraStatusFromExpiry } from "./reraStatus.js";
+
+// ✅ CRITICAL: Apply stealth BEFORE any launch calls
+puppeteer.use(StealthPlugin());
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const cache = new Map();
@@ -45,6 +49,7 @@ async function scrapeHaryanaDatabase(reraNumber) {
     const executablePath = await chromium.executablePath();
     if (!executablePath) throw new Error("Chromium not found");
 
+    // ✅ FIXED: Use puppeteer-extra with stealth plugin
     browser = await puppeteer.launch({
       args: [
         ...chromium.args,
@@ -79,16 +84,16 @@ async function scrapeHaryanaDatabase(reraNumber) {
 
     const page = await browser.newPage();
 
-    // ✅ Anti-bot: Realistic UA + viewport + locale
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
+    // ✅ CRITICAL: Set viewport + extra headers BEFORE goto
     await page.setViewport({ width: 1366, height: 768 });
     await page.setExtraHTTPHeaders({
       "Accept-Language": "en-US,en;q=0.9",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      "Accept-Encoding": "gzip, deflate, br",
+      "Cache-Control": "max-age=0",
     });
 
-    // ✅ CRITICAL FIX: Block heavy resources BEFORE goto to prevent hangs
+    // ✅ CRITICAL: Block heavy resources BEFORE goto
     await page.setRequestInterception(true);
     page.on("request", (req) => {
       const type = req.resourceType();
@@ -99,18 +104,32 @@ async function scrapeHaryanaDatabase(reraNumber) {
       }
     });
 
-    // ✅ CRITICAL FIX: Hard timeout on goto — don't wait for networkidle
-    // Use domcontentloaded with a 15s cap, then manually wait for the table
-    await page.goto("https://haryanarera.gov.in/admincontrol/registered_agents/2", {
-      waitUntil: "domcontentloaded",
-      timeout: 15000,
-    });
+    // ✅ FIXED: Use goto with explicit timeout and NO waitUntil
+    // Then manually poll for content — this bypasses lifecycle hangs
+    const response = await page.goto(
+      "https://haryanarera.gov.in/admincontrol/registered_agents/2",
+      {
+        waitUntil: "domcontentloaded",
+        timeout: 20000,
+      }
+    );
+
+    if (!response) {
+      throw new Error("No response from server");
+    }
+
+    const status = response.status();
+    console.log("Response status:", status);
+
+    if (status >= 400) {
+      throw new Error(`HTTP ${status} from server`);
+    }
 
     console.log("PAGE TITLE:", await page.title());
 
-    // ✅ CRITICAL FIX: Don't rely on waitForSelector alone — use polling with timeout
+    // ✅ FIXED: Poll for search input instead of waitForSelector
     const searchSelector = 'input[type="search"]';
-    const maxWaitTime = 10000;
+    const maxWaitTime = 15000;
     const pollInterval = 500;
     const startTime = Date.now();
     let searchInput = null;
@@ -122,7 +141,7 @@ async function scrapeHaryanaDatabase(reraNumber) {
     }
 
     if (!searchInput) {
-      // One reload attempt if selector missing
+      // One reload attempt
       await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
       const reloadStart = Date.now();
       while (Date.now() - reloadStart < maxWaitTime) {
@@ -136,7 +155,7 @@ async function scrapeHaryanaDatabase(reraNumber) {
       throw new Error("Search input not found after retries");
     }
 
-    // ✅ Clear and type reliably
+    // ✅ Type and trigger search
     await page.evaluate((sel) => {
       const el = document.querySelector(sel);
       if (el) {
@@ -144,19 +163,18 @@ async function scrapeHaryanaDatabase(reraNumber) {
         el.focus();
       }
     }, searchSelector);
-    await page.type(searchSelector, reraNumber, { delay: 10 });
+    await page.type(searchSelector, reraNumber, { delay: 15 });
 
-    // ✅ CRITICAL FIX: Poll for table rows instead of waitForSelector
-    // DataTables often updates DOM asynchronously
-    const tableRowsSelector = "table tbody tr";
+    // Small delay for DataTables to process
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // ✅ Poll for table rows
     const tableStart = Date.now();
     let rows = [];
-
     while (Date.now() - tableStart < 15000) {
-      rows = await page.$$eval(tableRowsSelector, (trs) =>
+      rows = await page.$$eval("table tbody tr", (trs) =>
         trs.map((tr) => Array.from(tr.querySelectorAll("td")).map((td) => td.innerText.trim()))
       );
-      // If we have rows with actual content, break
       if (rows.length > 0 && rows[0].length > 0) break;
       await new Promise((r) => setTimeout(r, 800));
     }
