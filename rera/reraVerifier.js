@@ -1,13 +1,6 @@
-// ✅ FIXED: Import puppeteer-extra and bind it to puppeteer-core
-import vanillaPuppeteer from "puppeteer-core";
-import { addExtra } from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import chromium from "@sparticuz/chromium";
+import puppeteer from "puppeteer-core";
 import { getReraStatusFromExpiry } from "./reraStatus.js";
-
-// ✅ Bind stealth plugin to puppeteer-core
-const puppeteer = addExtra(vanillaPuppeteer);
-puppeteer.use(StealthPlugin());
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const cache = new Map();
@@ -44,8 +37,106 @@ function getCached(key) {
   return entry.value;
 }
 
+// ---------------- API FALLBACK: Try direct HTTP first ----------------
+async function fetchViaApi(reraNumber) {
+  try {
+    // DataTables serverside processing endpoint
+    const url = "https://haryanarera.gov.in/admincontrol/registered_agents/2";
+
+    // Common DataTables payload — adjust if needed based on actual site behavior
+    const body = new URLSearchParams({
+      draw: "1",
+      columns: JSON.stringify([
+        { data: "0", name: "", searchable: "true", orderable: "true", search: { value: "", regex: "false" } },
+        { data: "1", name: "", searchable: "true", orderable: "true", search: { value: reraNumber, regex: "false" } },
+        { data: "2", name: "", searchable: "true", orderable: "true", search: { value: "", regex: "false" } },
+        { data: "3", name: "", searchable: "true", orderable: "true", search: { value: "", regex: "false" } },
+        { data: "4", name: "", searchable: "true", orderable: "true", search: { value: "", regex: "false" } },
+        { data: "5", name: "", searchable: "true", orderable: "true", search: { value: "", regex: "false" } },
+        { data: "6", name: "", searchable: "true", orderable: "true", search: { value: "", regex: "false" } },
+      ]),
+      start: "0",
+      length: "10",
+      search: JSON.stringify({ value: "", regex: "false" }),
+      _: String(Date.now()),
+    });
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": "https://haryanarera.gov.in/admincontrol/registered_agents/2",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+      body: body.toString(),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!response.ok) {
+      console.log("API fallback: HTTP", response.status);
+      return null;
+    }
+
+    const json = await response.json();
+    console.log("API response:", JSON.stringify(json).slice(0, 500));
+
+    if (!json.data || json.data.length === 0) {
+      return {
+        success: false,
+        status: "NOT_FOUND",
+        message: "RERA number was not found",
+      };
+    }
+
+    // Find matching row
+    const normalizedTarget = reraNumber.trim().toLowerCase();
+    const match = json.data.find((row) => {
+      // row is usually an array of HTML strings
+      const regNum = row[1]?.replace(/<[^>]+>/g, "").trim().toLowerCase();
+      return regNum === normalizedTarget;
+    });
+
+    if (!match) {
+      return {
+        success: false,
+        status: "NOT_FOUND",
+        message: "RERA number was not found",
+      };
+    }
+
+    const data = {
+      registrationNumber: match[1]?.replace(/<[^>]+>/g, "").trim() || "",
+      agentName: match[2]?.replace(/<[^>]+>/g, "").trim() || "",
+      district: match[3]?.replace(/<[^>]+>/g, "").trim() || "",
+      status: match[4]?.replace(/<[^>]+>/g, "").trim() || "",
+      validity: match[6]?.replace(/<[^>]+>/g, "").trim() || "",
+    };
+
+    const parsedValidity = parseReraDate(data.validity);
+    const verificationStatus = getReraStatusFromExpiry(parsedValidity);
+
+    return {
+      success: true,
+      status: verificationStatus,
+      data: {
+        ...data,
+        parsedValidity,
+      },
+    };
+  } catch (err) {
+    console.log("API fallback failed:", err.message);
+    return null;
+  }
+}
+
 // ---------------- SCRAPER ----------------
 async function scrapeHaryanaDatabase(reraNumber) {
+  // ✅ TRY API FIRST — much faster, no browser needed
+  const apiResult = await fetchViaApi(reraNumber);
+  if (apiResult) return apiResult;
+
   let browser;
 
   try {
@@ -104,11 +195,12 @@ async function scrapeHaryanaDatabase(reraNumber) {
       }
     });
 
+    // ✅ FIXED: No waitUntil at all — just load raw HTML, then evaluate
     const response = await page.goto(
       "https://haryanarera.gov.in/admincontrol/registered_agents/2",
       {
-        waitUntil: "domcontentloaded",
-        timeout: 20000,
+        waitUntil: "load",
+        timeout: 25000,
       }
     );
 
@@ -125,6 +217,12 @@ async function scrapeHaryanaDatabase(reraNumber) {
 
     console.log("PAGE TITLE:", await page.title());
 
+    // If page is blank or error, bail
+    const content = await page.content();
+    if (content.length < 200 || content.includes("Access Denied") || content.includes("blocked")) {
+      throw new Error("Page blocked or empty");
+    }
+
     const searchSelector = 'input[type="search"]';
     const maxWaitTime = 15000;
     const pollInterval = 500;
@@ -138,7 +236,7 @@ async function scrapeHaryanaDatabase(reraNumber) {
     }
 
     if (!searchInput) {
-      await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.reload({ waitUntil: "load", timeout: 20000 });
       const reloadStart = Date.now();
       while (Date.now() - reloadStart < maxWaitTime) {
         searchInput = await page.$(searchSelector);
@@ -160,7 +258,7 @@ async function scrapeHaryanaDatabase(reraNumber) {
     }, searchSelector);
     await page.type(searchSelector, reraNumber, { delay: 15 });
 
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1500));
 
     const tableStart = Date.now();
     let rows = [];
