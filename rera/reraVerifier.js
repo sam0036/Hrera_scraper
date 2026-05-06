@@ -38,7 +38,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
   let browser;
 
   try {
-    // ✅ Connect to Browserless instead of launching Chrome
     browser = await puppeteer.connect({
       browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_KEY}`,
     });
@@ -48,12 +47,10 @@ async function scrapeHaryanaDatabase(reraNumber) {
     page.setDefaultTimeout(20000);
     page.setDefaultNavigationTimeout(25000);
 
-    // ⚠️ IMPORTANT FIX (don’t block CSS or scripts)
     await page.setRequestInterception(true);
     page.on("request", (request) => {
       const resourceType = request.resourceType();
 
-      // ✅ safer blocking
       if (["image", "font", "media"].includes(resourceType)) {
         request.abort();
         return;
@@ -62,7 +59,6 @@ async function scrapeHaryanaDatabase(reraNumber) {
       request.continue();
     });
 
-    // optional but recommended
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
     );
@@ -81,13 +77,16 @@ async function scrapeHaryanaDatabase(reraNumber) {
 
     const searchSelector = 'input[type="search"]';
     await page.waitForSelector(searchSelector, { timeout: 15000 });
+
     await page.click(searchSelector, { clickCount: 3 });
     await page.type(searchSelector, reraNumber, { delay: 5 });
+
     await page.waitForSelector("table tbody tr", { timeout: 15000 });
 
     const data = await page.evaluate((targetID) => {
       const rows = Array.from(document.querySelectorAll("table tbody tr"));
       const normalizedTarget = targetID.trim().toLowerCase();
+
       const match = rows.find((row) => {
         const cells = row.querySelectorAll("td");
         return cells[1]?.innerText.trim().toLowerCase() === normalizedTarget;
@@ -96,8 +95,9 @@ async function scrapeHaryanaDatabase(reraNumber) {
       if (!match) return null;
 
       const cells = match.querySelectorAll("td");
+
       return {
-         registrationNumber: cells[1]?.innerText.trim() || "",
+        registrationNumber: cells[1]?.innerText.trim() || "",
         agentName: cells[2]?.innerText.trim() || "",
         district: cells[3]?.innerText.trim() || "",
         status: cells[4]?.innerText.trim() || "",
@@ -106,7 +106,11 @@ async function scrapeHaryanaDatabase(reraNumber) {
     }, reraNumber);
 
     if (!data) {
-      return { success: false, status: "NOT_FOUND", message: "RERA number was not found" };
+      return {
+        success: false,
+        status: "NOT_FOUND",
+        message: "RERA number was not found",
+      };
     }
 
     const parsedValidity = parseReraDate(data.validity);
@@ -120,10 +124,22 @@ async function scrapeHaryanaDatabase(reraNumber) {
         parsedValidity,
       },
     };
-  } } catch (error) {
+
+  } catch (error) {
     console.error("SCRAPER ERROR:", error.message);
+
+    return {
+      success: false,
+      status: "FAILED",
+      message: "RERA authority verification is temporarily unavailable",
+    };
+
   } finally {
-    if (browser) await browser.close(); 
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
+    }
   }
 }
 
