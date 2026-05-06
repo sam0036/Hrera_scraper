@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: hrera-scraper
+    env: node
+    region: singapore  # Closest free region to India
+    plan: free
+    buildCommand: |
+      apt-get install -y \
+        fonts-liberation \
+        libasound2 \
+        libatk-bridge2.0-0 \
+        libatk1.0-0 \
+        libcups2 \
+        libdbus-1-3 \
+        libgdk-pixbuf2.0-0 \
+        libnspr4 \
+        libnss3 \
+        libx11-xcb1 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxrandr2 \
+        xdg-utils \
+        libgbm1 \
+        libxss1 \
+        libxtst6 \
+        ca-certificates \
+        wget \
+        && npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/.cache/puppeteer
+      # Add your proxy URL here if HRERA blocks Render's IP:
+      # - key: PROXY_URL
+      #   value: http://user:pass@proxy-host:port
