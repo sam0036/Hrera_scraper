@@ -38,35 +38,46 @@ async function scrapeHaryanaDatabase(reraNumber) {
   let browser;
 
   try {
-    browser = await puppeteer.launch({
-      headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ],
+    // ✅ Connect to Browserless instead of launching Chrome
+    browser = await puppeteer.connect({
+      browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_KEY}`,
     });
 
     const page = await browser.newPage();
+
     page.setDefaultTimeout(20000);
     page.setDefaultNavigationTimeout(25000);
 
+    // ⚠️ IMPORTANT FIX (don’t block CSS or scripts)
     await page.setRequestInterception(true);
     page.on("request", (request) => {
       const resourceType = request.resourceType();
-      if (["image", "font", "stylesheet", "media"].includes(resourceType)) {
+
+      // ✅ safer blocking
+      if (["image", "font", "media"].includes(resourceType)) {
         request.abort();
         return;
       }
+
       request.continue();
     });
 
-    await page.goto("https://haryanarera.gov.in/admincontrol/registered_agents/2", {
-      waitUntil: "domcontentloaded",
-      timeout: 25000,
-    });
+    // optional but recommended
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+    );
+
+    await page.setViewport({ width: 1366, height: 768 });
+
+    await page.goto(
+      "https://haryanarera.gov.in/admincontrol/registered_agents/2",
+      {
+        waitUntil: "domcontentloaded",
+        timeout: 25000,
+      }
+    );
+
+    console.log("PAGE TITLE:", await page.title());
 
     const searchSelector = 'input[type="search"]';
     await page.waitForSelector(searchSelector, { timeout: 15000 });
@@ -109,14 +120,10 @@ async function scrapeHaryanaDatabase(reraNumber) {
         parsedValidity,
       },
     };
-  } catch (error) {
-    return {
-      success: false,
-      status: "FAILED",
-      message: "RERA authority verification is temporarily unavailable",
-    };
+  } } catch (error) {
+    console.error("SCRAPER ERROR:", error.message);
   } finally {
-    if (browser) await browser.close();
+    if (browser) await browser.close(); 
   }
 }
 
