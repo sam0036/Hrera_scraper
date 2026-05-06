@@ -39,7 +39,7 @@ async function scrapeHaryanaDatabase(reraNumber) {
 
   try {
     browser = await puppeteer.connect({
-      browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_KEY}`,
+      browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_KEY}&--proxy-server=http://136.226.254.24:12360`,
     });
 
     const page = await browser.newPage();
