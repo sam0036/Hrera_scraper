@@ -1,142 +1,88 @@
 import express from "express";
-import puppeteer from "puppeteer-core";
+import { verifyRera } from "./rera/reraVerifier.js";
 
 const app = express();
+app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 
-// ---------------- SCRAPER FUNCTION ----------------
-async function scrapeHaryanaDatabase(reraNumber) {
-  let browser;
+// ---------------- HEALTH CHECK ----------------
+app.get("/", (req, res) => {
+  res.json({ status: "ok", message: "HRERA Scraper is running" });
+});
 
-  try {
-    // ✅ Browserless connection
-    browser = await puppeteer.connect({
-      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${process.env.BROWSERLESS_KEY}`,
-    });
+// ---------------- POST /verify ----------------
+// Body: { reraNumber, state }
+app.post("/verify", async (req, res) => {
+  const { reraNumber, state } = req.body;
 
-    const page = await browser.newPage();
-
-    page.setDefaultTimeout(20000);
-    page.setDefaultNavigationTimeout(25000);
-
-    // ✅ lightweight blocking (SAFE)
-    await page.setRequestInterception(true);
-    page.on("request", (request) => {
-      const type = request.resourceType();
-
-      if (["image", "font", "media"].includes(type)) {
-        request.abort();
-      } else {
-        request.continue();
-      }
-    });
-
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36"
-    );
-
-    await page.setViewport({ width: 1366, height: 768 });
-
-    await page.goto(
-      "https://haryanarera.gov.in/admincontrol/registered_agents/2",
-      {
-        waitUntil: "domcontentloaded",
-        timeout: 25000,
-      }
-    );
-
-    console.log("PAGE TITLE:", await page.title());
-
-    const searchSelector = 'input[type="search"]';
-
-    await page.waitForSelector(searchSelector, { timeout: 15000 });
-
-    await page.click(searchSelector, { clickCount: 3 });
-    await page.type(searchSelector, reraNumber, { delay: 5 });
-
-    await page.waitForSelector("table tbody tr", { timeout: 15000 });
-
-    const data = await page.evaluate((targetID) => {
-      const rows = Array.from(document.querySelectorAll("table tbody tr"));
-      const target = targetID.trim().toLowerCase();
-
-      const match = rows.find((row) => {
-        const cells = row.querySelectorAll("td");
-        return cells[1]?.innerText.trim().toLowerCase() === target;
-      });
-
-      if (!match) return null;
-
-      const cells = match.querySelectorAll("td");
-
-      return {
-        registrationNumber: cells[1]?.innerText.trim() || "",
-        agentName: cells[2]?.innerText.trim() || "",
-        district: cells[3]?.innerText.trim() || "",
-        status: cells[4]?.innerText.trim() || "",
-        validity: cells[6]?.innerText.trim() || "",
-      };
-    }, reraNumber);
-
-    if (!data) {
-      return {
-        success: false,
-        status: "NOT_FOUND",
-      };
-    }
-
-    return {
-      success: true,
-      data,
-    };
-
-  } catch (error) {
-    console.error("SCRAPER ERROR:", error.message);
-
-    return {
+  if (!reraNumber) {
+    return res.status(400).json({
       success: false,
-      status: "FAILED",
-    };
-
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch {}
-    }
+      status: "INVALID_INPUT",
+      message: "reraNumber is required in request body",
+    });
   }
-}
 
-// ---------------- API ROUTE ----------------
-app.get("/verify", async (req, res) => {
   try {
-    const { reraNumber } = req.query;
-
-    if (!reraNumber) {
-      return res.status(400).json({
-        success: false,
-        message: "reraNumber is required",
-      });
-    }
-
-    const result = await scrapeHaryanaDatabase(reraNumber);
-
-    res.json(result);
-
-  } catch (error) {
-    res.status(500).json({
+    const result = await verifyRera(reraNumber, state || "Haryana");
+    return res.json(result);
+  } catch (err) {
+    console.error("POST /verify error:", err);
+    return res.status(500).json({
       success: false,
+      status: "SERVER_ERROR",
       message: "Internal server error",
     });
   }
 });
 
-// ---------------- ROOT ROUTE ----------------
-app.get("/", (req, res) => {
-  res.send("API is running");
+// ---------------- GET /verify/:reraNumber ----------------
+// Example: /verify/HRERA-PKL-REA-1234-2022
+app.get("/verify/:reraNumber", async (req, res) => {
+  const { reraNumber } = req.params;
+  const state = req.query.state || "Haryana";
+
+  try {
+    const result = await verifyRera(reraNumber, state);
+    return res.json(result);
+  } catch (err) {
+    console.error("GET /verify/:reraNumber error:", err);
+    return res.status(500).json({
+      success: false,
+      status: "SERVER_ERROR",
+      message: "Internal server error",
+    });
+  }
+});
+
+// ---------------- NEW: GET /verify?reraNumber=... ----------------
+// Example: /verify?reraNumber=HRERA-PKL-REA-1234-2022
+app.get("/verify", async (req, res) => {
+  const { reraNumber, state } = req.query;
+
+  if (!reraNumber) {
+    return res.status(400).json({
+      success: false,
+      status: "INVALID_INPUT",
+      message: "reraNumber query param is required",
+    });
+  }
+
+  try {
+    const result = await verifyRera(reraNumber, state || "Haryana");
+    return res.json(result);
+  } catch (err) {
+    console.error("GET /verify error:", err);
+    return res.status(500).json({
+      success: false,
+      status: "SERVER_ERROR",
+      message: "Internal server error",
+    });
+  }
 });
 
 // ---------------- START SERVER ----------------
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`HRERA Scraper server running on port ${PORT}`);
 });
